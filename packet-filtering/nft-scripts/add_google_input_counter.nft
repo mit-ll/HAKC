@@ -1,0 +1,8 @@
+#!/usr/sbin/nft -f
+
+define google_dns = 8.8.8.8 
+
+add table filter
+add counter filter ping-traffic
+add chain filter input {type filter hook input priority 0;}
+add rule filter input ip daddr $google_dns counter name ping-traffic 

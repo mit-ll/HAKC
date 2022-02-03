@@ -1,0 +1,7 @@
+#!/usr/sbin/nft -f
+
+
+add table ip6 filter
+add counter ip6 filter lo-traffic
+add chain ip6 filter input {type filter hook input priority 0;}
+add rule ip6 filter input iifname lo  counter name lo-traffic 

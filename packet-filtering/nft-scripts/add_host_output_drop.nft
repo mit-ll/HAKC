@@ -1,0 +1,7 @@
+#!/usr/sbin/nft -f
+
+define  host_dns = 10.0.2.2 
+
+add table filter
+add chain filter output {type filter hook output priority 0;}
+add rule filter output ip daddr $host_dns drop

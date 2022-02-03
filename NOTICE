@@ -1,0 +1,151 @@
+This NOTICE file is included to satisfy the GPLv2 redistribution requirements of the original Linux project.
+
+MIT has applied its copyright statement to its modifications and has exercised the source license terms to use, reproduce, and distribute these modifications as Derivative Works.
+
+This code is forked from Linux v5.10, see 5.10 tag at: https://github.com/torvalds/linux
+
+We also use raspberry pi support from Debian 5.10.28: https://sources.debian.org/src/linux/5.10.28-1/ 
+
+HAKC-NDSS2022 modifications are to the following files:
+    
+MTE-kernel/arch/arm64/Kconfig
+MTE-kernel/arch/arm64/include/asm/pointer_auth.h
+MTE-kernel/arch/arm64/kernel/cpufeature.c
+MTE-kernel/arch/arm64/kernel/hakc/hakc.c
+MTE-kernel/arch/arm64/kernel/mte-compart/mte-compart.c
+MTE-kernel/arch/arm64/kernel/mte-compart/pmc-transfer.c
+MTE-kernel/include/linux/hakc.h
+MTE-kernel/include/linux/list.h
+MTE-kernel/include/linux/module.h
+MTE-kernel/include/linux/mte-compart.h
+MTE-kernel/include/linux/pmc-transfer.h
+MTE-kernel/include/linux/rhashtable.h
+MTE-kernel/kernel/module.c
+MTE-kernel/net/core/dev.c
+MTE-kernel/net/core/net_namespace.c
+MTE-kernel/net/ipv6/addrconf.c
+MTE-kernel/net/ipv6/addrconf_core.c
+MTE-kernel/net/ipv6/addrlabel.c
+MTE-kernel/net/ipv6/af_inet6.c
+MTE-kernel/net/ipv6/ah6.c
+MTE-kernel/net/ipv6/anycast.c
+MTE-kernel/net/ipv6/calipso.c
+MTE-kernel/net/ipv6/data
+MTE-kernel/net/ipv6/datagram.c
+MTE-kernel/net/ipv6/esp6.c
+MTE-kernel/net/ipv6/esp6_offload.c
+MTE-kernel/net/ipv6/exthdrs.c
+MTE-kernel/net/ipv6/exthdrs_core.c
+MTE-kernel/net/ipv6/exthdrs_offload.c
+MTE-kernel/net/ipv6/fib6_notifier.c
+MTE-kernel/net/ipv6/fib6_rules.c
+MTE-kernel/net/ipv6/fou6.c
+MTE-kernel/net/ipv6/icmp.c
+MTE-kernel/net/ipv6/inet6_connection_sock.c
+MTE-kernel/net/ipv6/inet6_hashtables.c
+MTE-kernel/net/ipv6/ip6_checksum.c
+MTE-kernel/net/ipv6/ip6_fib.c
+MTE-kernel/net/ipv6/ip6_flowlabel.c
+MTE-kernel/net/ipv6/ip6_gre.c
+MTE-kernel/net/ipv6/ip6_icmp.c
+MTE-kernel/net/ipv6/ip6_input.c
+MTE-kernel/net/ipv6/ip6_offload.c
+MTE-kernel/net/ipv6/ip6_output.c
+MTE-kernel/net/ipv6/ip6_tunnel.c
+MTE-kernel/net/ipv6/ip6_udp_tunnel.c
+MTE-kernel/net/ipv6/ip6_vti.c
+MTE-kernel/net/ipv6/ip6mr.c
+MTE-kernel/net/ipv6/ipcomp6.c
+MTE-kernel/net/ipv6/ipv6_sockglue.c
+MTE-kernel/net/ipv6/mcast.c
+MTE-kernel/net/ipv6/mcast_snoop.c
+MTE-kernel/net/ipv6/mip6.c
+MTE-kernel/net/ipv6/ndisc.c
+MTE-kernel/net/ipv6/netfilter.c
+MTE-kernel/net/ipv6/output_core.c
+MTE-kernel/net/ipv6/ping.c
+MTE-kernel/net/ipv6/proc.c
+MTE-kernel/net/ipv6/protocol.c
+MTE-kernel/net/ipv6/raw.c
+MTE-kernel/net/ipv6/reassembly.c
+MTE-kernel/net/ipv6/route.c
+MTE-kernel/net/ipv6/rpl.c
+MTE-kernel/net/ipv6/rpl_iptunnel.c
+MTE-kernel/net/ipv6/seg6.c
+MTE-kernel/net/ipv6/seg6_hmac.c
+MTE-kernel/net/ipv6/seg6_iptunnel.c
+MTE-kernel/net/ipv6/seg6_local.c
+MTE-kernel/net/ipv6/sit.c
+MTE-kernel/net/ipv6/syncookies.c
+MTE-kernel/net/ipv6/sysctl_net_ipv6.c
+MTE-kernel/net/ipv6/tcp_ipv6.c
+MTE-kernel/net/ipv6/tcpv6_offload.c
+MTE-kernel/net/ipv6/tunnel6.c
+MTE-kernel/net/ipv6/udp.c
+MTE-kernel/net/ipv6/udp_offload.c
+MTE-kernel/net/ipv6/udplite.c
+MTE-kernel/net/ipv6/xfrm6_input.c
+MTE-kernel/net/ipv6/xfrm6_output.c
+MTE-kernel/net/ipv6/xfrm6_policy.c
+MTE-kernel/net/ipv6/xfrm6_protocol.c
+MTE-kernel/net/ipv6/xfrm6_state.c
+MTE-kernel/net/ipv6/xfrm6_tunnel.c
+MTE-kernel/net/netfilter/core.c
+MTE-kernel/net/netfilter/nf_dup_netdev.c
+MTE-kernel/net/netfilter/nf_log.c
+MTE-kernel/net/netfilter/nf_log_common.c
+MTE-kernel/net/netfilter/nf_queue.c
+MTE-kernel/net/netfilter/nf_sockopt.c
+MTE-kernel/net/netfilter/nf_tables_api.c
+MTE-kernel/net/netfilter/nf_tables_core.c
+MTE-kernel/net/netfilter/nf_tables_offload.c
+MTE-kernel/net/netfilter/nf_tables_trace.c
+MTE-kernel/net/netfilter/nfnetlink.c
+MTE-kernel/net/netfilter/nfnetlink_log.c
+MTE-kernel/net/netfilter/nft_bitwise.c
+MTE-kernel/net/netfilter/nft_byteorder.c
+MTE-kernel/net/netfilter/nft_chain_filter.c
+MTE-kernel/net/netfilter/nft_chain_route.c
+MTE-kernel/net/netfilter/nft_cmp.c
+MTE-kernel/net/netfilter/nft_counter.c
+MTE-kernel/net/netfilter/nft_dup_netdev.c
+MTE-kernel/net/netfilter/nft_dynset.c
+MTE-kernel/net/netfilter/nft_exthdr.c
+MTE-kernel/net/netfilter/nft_fib.c
+MTE-kernel/net/netfilter/nft_fwd_netdev.c
+MTE-kernel/net/netfilter/nft_hash.c
+MTE-kernel/net/netfilter/nft_immediate.c
+MTE-kernel/net/netfilter/nft_limit.c
+MTE-kernel/net/netfilter/nft_log.c
+MTE-kernel/net/netfilter/nft_lookup.c
+MTE-kernel/net/netfilter/nft_meta.c
+MTE-kernel/net/netfilter/nft_numgen.c
+MTE-kernel/net/netfilter/nft_objref.c
+MTE-kernel/net/netfilter/nft_payload.c
+MTE-kernel/net/netfilter/nft_quota.c
+MTE-kernel/net/netfilter/nft_range.c
+MTE-kernel/net/netfilter/nft_reject.c
+MTE-kernel/net/netfilter/nft_reject_inet.c
+MTE-kernel/net/netfilter/nft_rt.c
+MTE-kernel/net/netfilter/nft_set_bitmap.c
+MTE-kernel/net/netfilter/nft_set_hash.c
+MTE-kernel/net/netfilter/nft_set_pipapo.c
+MTE-kernel/net/netfilter/nft_set_rbtree.c
+MTE-kernel/net/netfilter/nft_socket.c
+MTE-kernel/net/netfilter/nft_tproxy.c
+MTE-kernel/net/netfilter/nft_tunnel.c
+MTE-kernel/net/netlink/af_netlink.c
+
+  Copyright (C) 2021, MASSACHUSETTS INSTITUTE OF TECHNOLOGY
+  SPDX-License-Identifier: GPL-2.0-only
+  Subject to FAR 52.227-11 – Patent Rights – Ownership by the Contractor (May 2014)
+
+  DISTRIBUTION STATEMENT A. Approved for public release: distribution unlimited.
+  This material is based upon work supported by USD(R&E) under Air Force Contract
+  No. FA8702-15-D-0001. Any opinions, findings, conclusions or recommendations
+  expressed in this material are those of the author(s) and do not necessarily
+  reflect the views of USD(R&E).
+
+  The software/firmware is provided to you on an As-Is basis
+
+
