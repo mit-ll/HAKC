@@ -27,8 +27,6 @@ To Use while compiling the Linux kernel
 
 1. cd `MTE-kernel`
 1. `ln -s ../PMC-Pass/build/lib/libPMCPass.so scripts/pac-mte`
-1. `export BUILD_TYPE=pmc-build; make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LLVM=1 CC=clang
-HOSTCC=clang O=$BUILD_TYPE LOCALVERSION=$BUILD_TYPE -j$(nproc) defconfig`
 1. `cp ../packet-filtering/nftables_kernel_config_mte $BUILD_TYPE/.config`
 1. `export BUILD_TYPE=pmc-build; make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LLVM=1 CC=clang
 HOSTCC=clang O=$BUILD_TYPE LOCALVERSION=$BUILD_TYPE -j$(nproc) menuconfig`

@@ -3,19 +3,14 @@
 //
 /**
  * @brief HAKC Analysis and Transformation pass
- * @file HAKCPass.h
+ * @file PMCPass.h
  */
 
-#ifndef PMC_HAKCPASS_H
-#define PMC_HAKCPASS_H
-
-#define MODULES_LIMIT 255
-#define MASK_COLOR_LIMIT 65535
+#ifndef PMC_PMCPASS_H
+#define PMC_PMCPASS_H
 
 #include <set>
 #include <vector>
-
-#include "HAKC-defs.h"
 
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/IRBuilder.h"
@@ -30,106 +25,7 @@
 
 using namespace llvm;
 
-namespace hakc {
-    std::error_code getCorrespondingPathInBuildDirectory(StringRef
-                                                         pathToSourceFile, SmallVectorImpl<char> &result);
-
-    std::error_code getRelativeSourcePath(StringRef relativeSourcePath,
-                                          SmallVectorImpl<char> &result);
-
-    class HAKCFile;
-    class HAKCClique;
-    class HAKCCompartment;
-    class HAKCSystemInformation;
-
-    class HAKCSymbol {
-    protected:
-        std::shared_ptr<HAKCClique> clique;
-        std::string                 name;
-        std::shared_ptr<HAKCFile>   file;
-
-    public:
-        HAKCSymbol(std::string name, std::shared_ptr<HAKCClique> clique, std::shared_ptr<HAKCFile> path);
-        ConstantInt *getColor();
-        ConstantInt *getCompartmentID();
-        std::shared_ptr<HAKCCompartment> getCompartment();
-        std::shared_ptr<HAKCClique> getClique();
-        StringRef getName();
-    };
-
-    class HAKCCompartment {
-    protected:
-        ConstantInt* id;
-        ConstantInt* entry_token;
-        std::set<std::shared_ptr<HAKCCompartment>> targets;
-        std::set<std::shared_ptr<HAKCClique>> cliques;
-        // HAKCSystemInformation& hsi;
-        // GlobalVariable* target
-
-    public:
-        HAKCCompartment(YamlCompartment& compartment, LLVMContext &C);
-        void addClique(std::shared_ptr<HAKCClique> clique, std::shared_ptr<HAKCCompartment> compart);
-        void addTarget(std::shared_ptr<HAKCCompartment> target);
-        std::shared_ptr<HAKCClique> getClique(ConstantInt* color);
-        ConstantInt *getID();
-        ConstantInt *getEntryToken();
-        std::set<std::shared_ptr<HAKCCompartment>> getTargets();
-    };
-    
-    class HAKCClique {
-    protected:
-        ConstantInt* color;
-        ConstantInt* access_token;
-        std::shared_ptr<HAKCCompartment> compartment;
-        std::set<std::shared_ptr<HAKCSymbol>> symbols;
-
-    public:
-        HAKCClique(std::shared_ptr<HAKCCompartment> clique_compartment, ConstantInt* clique_color, ConstantInt* clique_access_token); 
-        void setCompartment(std::shared_ptr<HAKCCompartment> compartment);
-        void addSymbol(std::shared_ptr<HAKCSymbol> symbol);
-        ConstantInt *getAccessToken();
-        ConstantInt *getColor();
-        ConstantInt *getCompartmentID();
-        std::shared_ptr<HAKCCompartment> getCompartment();
-    };
-
-    class HAKCFile {
-    protected:
-        std::string                                  path;
-        std::set<std::shared_ptr<HAKCSymbol>>        symbols;
-        ConstantInt*                                 guid;
-        std::set<std::shared_ptr<HAKCCompartment>>   compartments;
-
-    public:
-        HAKCFile(YamlFile& file, LLVMContext &C);
-        void addSymbol(std::shared_ptr<HAKCSymbol> symbol);
-        void addCompartment(std::shared_ptr<HAKCCompartment> comp);
-        ConstantInt *getColor(StringRef name);
-        ConstantInt *getCompartmentID(StringRef name);
-        ConstantInt *getAccessToken(StringRef name);
-        bool hasCompartments();
-    };
-
-    class HAKCSystemInformation {
-    protected:
-        llvm::Module &Module;
-        std::map<uint64_t, std::shared_ptr<HAKCCompartment>> compartments;
-        std::map<std::string, std::shared_ptr<HAKCFile>> files;
-
-    public:
-        HAKCSystemInformation(llvm::Module &M);
-        ConstantInt *getElementColor(StringRef file, StringRef element);
-        ConstantInt *getElementCompartment(StringRef file, StringRef element);
-        ConstantInt *getElementAccessToken(StringRef file, StringRef element);
-        ConstantInt *getEntryToken(uint64_t compartment);
-        GlobalVariable *getTargets(uint64_t compartment);
-        static std::string getColorFromValue(ConstantInt *color);
-        bool hasFile(StringRef file);
-        std::shared_ptr<HAKCFile> getFile(StringRef file);
-        std::shared_ptr<HAKCClique> getClique(uint64_t compartment, ConstantInt *color);
-        std::shared_ptr<HAKCCompartment> getCompartment(uint64_t id);
-        llvm::Module& getModule();
-    };
+namespace {
 
     class CommonHAKCAnalysis {
     protected:
@@ -137,32 +33,21 @@ namespace hakc {
         * @brief Set to true to output debugging information
         */
         bool debug_output;
-        HAKCSystemInformation &compartmentInfo;
 
-        CommonHAKCAnalysis(bool debug, HAKCSystemInformation &compartmentInfo);
+        CommonHAKCAnalysis(bool debug);
+        std::vector<Value *> findDefChain(Value *v, bool followLoad = false);
         int getFunctionArgNumber(Value *v);
+        Value *getDef(Value *V, bool followLoad = false);
+        GlobalVariable *getSymbolColor(Module &M, StringRef symbolName);
         bool callIsSafeTransition(CallInst *call);
         bool isHAKCFunction(Function *F);
         bool isSafeTransitionFunction(Function *F);
-        bool isIntrinsicNeedingAuthentication(CallInst *);
+        bool isIntrinsicNeedingAuthentication(CallInst*);
         bool functionIsAnalysisCandidate(Function *F);
+        bool isManuallyAnnotated(Function *F);
         bool isOutsideTransferFunc(Function *F);
         bool isRegisterRead(Value *v);
         bool isPerCPUPointer(Value *v);
-        bool isTransferFunction(StringRef name);
-        bool isInHAKCFunctions(StringRef name);
-        bool isValidColor(ConstantInt *symbolColor);
-        Value *createSizeOf(Type *type, IRBuilder<> *irBuilder, Module *M);
-        CallInst *saveColor(Value *operand, IRBuilder<> *irBuilder, Module *M);
-        std::tuple<StringRef, int, int> getHAKCFunction(StringRef name);
-        ConstantInt *getElementCompartment(StringRef name, StringRef element);
-        ConstantInt *getElementColor(StringRef name, StringRef element);
-        ConstantInt *getElementAccessToken(StringRef name, StringRef element);
-
-    public:
-        HAKCSystemInformation &getCompartmentInfo();
-        static Value *getDef(Value *V, bool followLoad = false, bool debug = false);
-        static std::vector<Value *> findDefChain(Value *v, bool followLoad = false, bool debug = false);
     };
 
     class HAKCModuleTransformation : public CommonHAKCAnalysis {
@@ -176,6 +61,7 @@ namespace hakc {
 
     private:
         void moveGlobalsToPMCSection();
+        bool isMTETransferFunction(Function *F);
         void findMismatchedTransfers(Function *F);
         std::set<Value *> findPointerDereferences(Function *F);
         std::set<Value *> findPointerUses(Function *F);
@@ -186,16 +72,10 @@ namespace hakc {
                            Function *bFunc, bool print = false);
         void compartmentalizeModule();
         void removeSignatures();
-        void updateCallParameters(std::map<Function *, std::set<CallInst *>> calls_map);
-        bool functionEscapes(Function *F);
-        std::set<Use*> getEscapingUses(Function *F);
-        Function* createTransferFunction(Function *F);
-        void addTransferFunctions();
 
     public:
         unsigned totalDataChecks, totalCodeChecks, totalTransfers;
-        std::map<Function *, std::set<CallInst *>> HAKCFunctions;
-        HAKCModuleTransformation(Module &Module, HAKCSystemInformation &compartmentInformation);
+        HAKCModuleTransformation(Module &Module);
         bool isCompartmentalized();
         bool isModuleTransformed();
         std::set<Value *> getAuthenticatedPointersIn(Function *F);
@@ -240,9 +120,9 @@ namespace hakc {
         /**
          * @brief Annotated global variables
          */
-        ConstantInt *claqueId;
-        ConstantInt *currentColor;
-        ConstantInt *currentAccessToken;
+        LoadInst *claqueId;
+        LoadInst *currentColor;
+        LoadInst *currentAccessToken;
         /**
          * @brief Mapping of signed pointers that need authentication, and the
          * instructions that dereference the signed pointers.
@@ -257,7 +137,7 @@ namespace hakc {
 
         std::set<Value *> pointersAlreadyAuthenticated;
 
-        std::map<CallInst *, std::set<Value *>> stackPtrsPassedToFuncs;
+        std::map<CallInst*, std::set<Value*>> stackPtrsPassedToFuncs;
 
         HAKCModuleTransformation &M;
 
@@ -270,6 +150,7 @@ namespace hakc {
         CallInst *addSignatureCall(Value *operand);
         CallInst *addSignatureWithColorCall(Value *operand);
         CallInst *addCliqueTransferCall(Value *operand, Value *original_color, Value *claque_id);
+        Value *createSizeOf(Type *type);
         Value *addTargetTransfer(Use &operand, Value *address);
         bool userInFunction(Value *user);
         BasicBlock *
@@ -277,6 +158,7 @@ namespace hakc {
         Instruction *findInsertionPoint(Value *v);
         Instruction *
         findUseInsertionPoint(Value *v, std::set<Instruction *> &users);
+        CallInst *saveColor(Value *operand);
         void addCodeAuthCheck(Value *indirectCallTarget);
         void addGetSafeCodePtr(Value *indirectCallTarget);
         bool argShouldTransfer(Use &operand);
@@ -304,7 +186,7 @@ namespace hakc {
                                         Instruction *I);
         bool phiNodeUsesValue(PHINode *phiNode, Value *target,
                               std::set<PHINode *> &visited);
-        bool globalNeedsTransferring(GlobalValue *);
+        bool globalNeedsTransferring(GlobalValue*);
         void addAllGlobalTransfers();
         bool isStackAllocatedObject(Value *v);
         bool isSelectOfAuthenticatedPointers(Value *v);
@@ -319,10 +201,10 @@ namespace hakc {
         void handleBinaryOperator(BinaryOperator *binOp);
         bool globalShouldBeTransferred(Use &globalValueArg);
         void handleCall(CallInst *call);
+        Instruction *functionInsertionPoint();
         void getFunctionMTEMetadata();
         Value *addTransferToTarget(Value *value, Value *address);
-        std::map<Value *, Instruction *> findAllInsertionLocations();
-        GlobalVariable *getValidEntryTokens();
+        std::map<Value*, Instruction*> findAllInsertionLocations();
 
     public:
         HAKCFunctionAnalysis(Function &F, bool debug,
@@ -333,4 +215,5 @@ namespace hakc {
     };
 }// namespace
 
-#endif//PMC_HAKCPASS_H
+#endif//PMC_PMCPASS_H
+

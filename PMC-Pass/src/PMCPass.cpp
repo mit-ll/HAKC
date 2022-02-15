@@ -1,9 +1,1226 @@
-//
-// Created by derrick on 8/20/21.
-//
-#include "HAKCPass.h"
+/**
+ * @brief HAKC Analysis and Transformation pass
+ * @file PMCPass.cpp
+ */
 
-namespace hakc {
+#include "PMCPass.h"
+
+using namespace llvm;
+
+namespace {
+    /**
+     * @brief Core kernel functions that are called directly. Transfers to
+     * these functions
+     * are not recolored, and the authenticated pointer is passed when invoked.
+     */
+    const std::set<StringRef> safe_transition_functions = {
+            "mod_delayed_work",
+            "kasan_check_write",
+            "arch_static_branch_jump",
+            "arch_static_branch",
+            //            "static_branch_TTWU_QUEUE",
+            //            "static_branch_WARN_DOUBLE_CLOCK",
+            //            "static_branch_HRTICK",
+            "kmalloc",
+            "bitmap_set",
+            "__clear_bit",
+            "atomic_set",
+            "bitmap_clear",
+            "static_key_false",
+            "static_key_true",
+            "__percpu_counter_init",
+            "init_timer_key",
+            "inet_peer_base_init",
+            "spinlock_check",
+            "_raw_spin_lock",
+            "_raw_spin_unlock",
+            "register_net_sysctl",
+            "__nlmsg_put",
+            "rhashtable_init",
+            //            "nla_put",
+            //            "sock_init_data",
+            //            "rtnl_notify",
+            "neigh_parms_alloc",
+            "__preempt_count_add",
+            //            "nla_data",
+            "proc_create_single_data",
+            "write_lock_bh",
+            "_raw_write_lock_bh",
+            "write_unlock_bh",
+            "_raw_write_unlock_bh",
+            //            "neigh_sysctl_register",
+            "snprintf",
+            //            "dev_get_by_index",
+            //            "fib_nh_common_init",
+            "_raw_spin_lock_bh",
+            "_raw_spin_unlock_bh",
+            "spin_lock_bh",
+            "spin_unlock_bh",
+            //            "call_fib_notifiers",
+            //            "fib_nexthop_info",
+            //            "dev_get_flags",
+            "strlen",
+            "strchr",
+            //            "dev_get_iflink",
+            //            "dev_mc_add",
+            //            "sock_alloc_send_skb",
+            //            "dst_alloc",
+            //            "sk_mc_loop",
+            //            "__neigh_create",
+            //            "fqdir_init",
+            //            "neigh_resolve_output",
+            //            "skb_set_owner_w",
+            //            "dev_queue_xmit",
+            //            "__skb_checksum_complete",
+            //            "neigh_update",
+            //            "kfree_skb",
+            //            "call_rcu",
+            "proc_dointvec",
+            //            "sk_alloc",
+            //            "udp_lib_get_port",
+            //            "tcp_init_sock",
+            //            "udp_cmsg_send",
+            //            "dev_mc_del",
+            //            "sk_dst_check",
+            //            "udp_lib_rehash",
+            //            "sk_setup_caps",
+            //            "skb_clone",
+            //            "sk_filter_trim_cap",
+            //            "skb_dst_copy",
+            //            "skb_pull_rcsum",
+            //            "__udp_enqueue_schedule_skb",
+            //            "__skb_recv_udp",
+            "_copy_to_iter",
+            //            "put_cmsg",
+            //            "skb_consume_udp",
+            "atomic_notifier_chain_register",
+            "instrument_atomic_write",
+            //            "hlist_add_head_rcu",
+            "spin_lock",
+            "spin_unlock",
+            "list_add_rcuhlist_empty",
+            //            "dev_add_offload",
+            "kmemdup",
+            "rtnl_register_module",
+            "rtnl_af_register",
+            "rtnl_af_unregister",
+            "__do_once_start",
+            "__do_once_done",
+            "get_random_bytes",
+            "proto_register",
+            "proto_unregister",
+            //            "__list_add_valid",
+            //            "sock_register",
+            "register_pernet_subsys",
+            "unregister_pernet_subsys",
+            "find_next_bit",
+            "cpumask_next",
+            "proc_create_net_data",
+            "mod_delayed_work_on",
+            //            "neigh_table_init",
+            //            "fib_notifier_ops_register",
+            "register_netdevice_notifier",
+            "unregister_netdevice_notifier",
+            "proc_create_net_single",
+            "proc_mkdir",
+            "snprintf",
+            "kmem_cache_create",
+            "alloc_workqueue",
+            "__warn_printk",
+            //            "dev_hold",
+            //            "genl_register_family",
+            "system_uses_lse_atomics",
+            "__do_once_done",
+            "__do_once_start",
+            "__memcpy",
+            "memcpy",
+            "__pi_memcmp",
+            "memcmp",
+            "__pi_strcmp",
+            "strcmp",
+            "__kern_my_cpu_offset",
+            "__preempt_count_dec_and_test",
+            "__percpu_add_case_32",
+            "test_bit",
+            "cancel_delayed_work",
+            //            "inet_frags_init",
+            //            "sock_prot_inuse_add",
+            //            "dev_add_pack",
+            //            "net_generic",
+            "neigh_parms_release",
+            "preempt_count",
+            //            "write_pnet",
+            //            "read_pnet",
+            "rhltable_init",
+            "queued_spin_lock_slowpath",
+            "crypto_alloc_shash",
+            "memchr_inv",
+            "inet_ctl_sock_create",
+            "fib_rules_register",
+            "kmem_cache_destroy",
+            "prandom_u32_state",
+            "percpu_counter_add_batch",
+            "_mix_pool_bytes",
+            "add_device_randomness",
+    };
+
+    const StringRef data_check_name = "check_hakc_data_access";
+    const StringRef code_check_name = "check_hakc_code_access";
+    const StringRef transfer_name = "hakc_transfer_data_to_target";
+    const StringRef get_color_name = "get_hakc_address_color";
+    const StringRef claque_transfer_name = "hakc_transfer_to_clique";
+    const StringRef get_safe_ptr_name = "hakc_safe_ptr";
+    const StringRef sign_ptr_with_color_name = "hakc_sign_pointer_with_color";
+    const StringRef sign_ptr_name = "hakc_sign_pointer";
+    const StringRef per_cpu_transfer_name = "hakc_transfer_percpu_to_clique";
+
+    const StringRef claque_id_name = "__claque_id";
+    const StringRef color_name = "__color";
+    const StringRef access_token_name = "__acl_tok";
+    const StringRef exit_token_name = "__valid_targets";
+
+    const StringRef outside_transfer_prefix = "HAKC_TRANSFER_";
+
+    /**
+     * @brief The set of files to run our analysis on
+     */
+    const std::set<StringRef> source_files_to_instrument = {
+            "../net/",
+            "../fs/proc/proc_sysctl.c",
+            "../lib/list_debug.c",
+            "../lib/nlattr.c",
+            "../lib/rhashtable.c",
+            "../lib/string.c",
+            "../lib/kobject_uevent.c",
+            "../fs/proc/generic.c",
+            "../kernel/",
+            "../security/commoncap.c",
+            "../drivers/net",
+            "../lib/percpu_counter.c",
+            "../lib/vsprintf.c",
+    };
+
+    /**
+     * @brief The set of files to NOT run our analysis on
+     */
+    const std::set<StringRef> source_files_to_skip = {
+            "../lib/idr.c",
+            "../lib/xarray.c",
+    };
+
+    /**
+     * @brief LLVM intrinsics that should use unsigned pointers
+     */
+    const std::set<Intrinsic::ID> intrinsics_needing_authenticated_args = {
+            Intrinsic::IndependentIntrinsics::memcpy,
+            Intrinsic::IndependentIntrinsics::memmove,
+            Intrinsic::IndependentIntrinsics::memset,
+    };
+
+    /**
+     * @brief LLVM intrinsics to skip analysis of
+     */
+    const std::set<Intrinsic::ID> intrinsics_to_skip = {
+            Intrinsic::IndependentIntrinsics::dbg_declare,
+            Intrinsic::IndependentIntrinsics::dbg_addr,
+            Intrinsic::IndependentIntrinsics::dbg_label,
+            Intrinsic::IndependentIntrinsics::dbg_value,
+            Intrinsic::IndependentIntrinsics::lifetime_start,
+            Intrinsic::IndependentIntrinsics::lifetime_end,
+            Intrinsic::IndependentIntrinsics::read_register,
+    };
+
+    /**
+     * @brief ELF sections to skip when trying to find the color
+     */
+    const std::set<StringRef> sections_to_skip = {
+            ".modinfo"};
+
+    /**
+     * @brief The names of kernel functions that allocate heap data.  These
+     * are used to ensure the developer has added a transfer whenever these
+     * are called.
+     */
+    const std::set<StringRef> kernel_allocation_funcs = {
+            "kmalloc",
+            "kzalloc",
+            "neigh_parms_alloc",
+            "nlmsg_new",
+            "kmemdup",
+            "alloc_percpu",
+            "__alloc_percpu",
+            "alloc_percpu_gfp",
+            "__alloc_percpu_gfp",
+            "kmalloc_array",
+            "kcalloc",
+            "genlmsg_new",
+            "sk_alloc",
+            "kmem_cache_zalloc",
+            "nla_memdup",
+            "kzalloc_node",
+            "fib_rules_register",
+    };
+
+    /**
+     * @brief The names of HAKC related operations
+     */
+    const std::set<StringRef> hakc_functions = {
+            data_check_name,
+            code_check_name,
+            transfer_name,
+            get_color_name,
+            claque_transfer_name,
+            get_safe_ptr_name,
+            sign_ptr_with_color_name,
+            sign_ptr_name,
+    };
+
+    /**
+     * @brief The function names used for HAKC transfers
+     */
+    const std::set<StringRef> hakc_transfer_funcs = {
+            transfer_name,
+            claque_transfer_name,
+            per_cpu_transfer_name,
+            "hakc_transfer_sock",
+            "hakc_transfer_net",
+            "hakc_transfer_socket",
+            "hakc_record_common",
+            "hakc_transfer_to_destination",
+            "hakc_restore_original",
+            "hakc_restore_net",
+            "hakc_restore_socket",
+            "hakc_restore_sock",
+    };
+
+    /**
+     * @brief The set of functions that should NOT be analyzed for caller
+     * authenticated pointer input arguments
+     */
+    const std::set<StringRef> optimization_deny_list = {
+            "inet6_sk_generic"};
+
+    const std::set<StringRef> functions_to_add_transfers = {
+
+    };
+
+    const StringRef section_prepend = ".hakc.";
+
+    /**
+     * @brief Finds the functions to instrument, and, for each function,
+     * performs an analysis that attempts to determine which pointer input
+     * arguments are checked by all callers of said function. Those pointers
+     * then do not need to be checked.
+     *
+     * @param Module
+     */
+    HAKCModuleTransformation::HAKCModuleTransformation(Module &Module)
+            : CommonHAKCAnalysis(false), M(Module),
+              compartmentalized(isModuleCompartmentalized(Module)),
+              moduleModified(false),
+              breakOnMissingTransfer(true),
+              debugName("fib6_nh_release"), totalDataChecks(0),
+              totalCodeChecks(0), totalTransfers(0) {
+
+        bool sourceShouldBeInstrumented = false;
+        for (auto filename : source_files_to_instrument) {
+            if (M.getSourceFileName().find(filename.str()) !=
+                std::string::npos &&
+                source_files_to_skip.find(M.getSourceFileName()) ==
+                source_files_to_skip.end()) {
+                sourceShouldBeInstrumented = true;
+                break;
+            }
+        }
+        if (!sourceShouldBeInstrumented) {
+            //            errs() << "Skipping " << M.getSourceFileName() << "\n";
+            return;
+        }
+
+        for (auto &F : M.getFunctionList()) {
+            debug_output = (F.getName() == debugName);
+            if (functionNeedsAnalysis(&F)) {
+                if (debug_output) {
+                    F.print(errs());
+                }
+
+                std::set<Value *> pointers = findPointerDereferences(&F);
+                if (debug_output) {
+                    errs() << "Adding " << pointers.size()
+                           << " to out list of " << F.getName() << "\n";
+                }
+                authenticatedPointersOut[&F] = pointers;
+
+                findMismatchedTransfers(&F);
+            }
+        }
+
+        bool inSetsChanged;
+        do {
+            inSetsChanged = false;
+            for (auto it : authenticatedPointersOut) {
+                debug_output = (it.first->getName() == debugName);
+                if (debug_output) {
+                    errs() << "Updating in pointer list for "
+                           << it.first->getName() << "\n";
+
+                }
+                std::set<Value *> origInSet = getAuthenticatedPointersIn(
+                        it.first);
+                std::set<Value *> currInSet = findAuthenticatedPointersAtStart(
+                        it.first);
+                if(debug_output) {
+                    errs() << "origInSet:\n";
+                    for(auto *v : origInSet) {
+                        errs() << "\t";
+                        v->print(errs());
+                        errs() << "\n";
+                    }
+                    errs() << "currInSet:\n";
+                    for(auto *v : currInSet) {
+                        errs() << "\t";
+                        v->print(errs());
+                        errs() << "\n";
+                    }
+                }
+
+                if (origInSet.size() != currInSet.size()) {
+                    if (debug_output) {
+                        errs()
+                                << "Authenticated In Pointer set changed for "
+                                << it.first->getName() << "\n";
+                    }
+                    inSetsChanged = true;
+                    authenticatedPointersIn[it.first] = currInSet;
+                    for (auto *ptr : currInSet) {
+                        authenticatedPointersOut[it.first].insert(ptr);
+                    }
+                }
+            }
+        } while (inSetsChanged);
+
+        if (!missingTransfers.empty()) {
+            errs() << "There are missing transfers in "
+                   << M.getSourceFileName() << ":\n";
+            for (auto it : missingTransfers) {
+                errs() << it.first->getName() << ":\n";
+                for (auto *call : it.second) {
+                    errs() << "\t" << call->getCalledFunction()->getName()
+                           << " " << call->getDebugLoc().getLine() << "\n";
+                }
+            }
+            assert(!breakOnMissingTransfer);
+        }
+    }
+
+    /**
+     * @brief Collective analysis functionality
+     * @param debug
+     */
+    CommonHAKCAnalysis::CommonHAKCAnalysis(bool debug) : debug_output(debug) {}
+
+    /**
+     * @brief Returns true if @param call is an LLVM intrinsic that needs its
+     * arguments authenticated
+     * @param call
+     * @return
+     */
+    bool CommonHAKCAnalysis::isIntrinsicNeedingAuthentication(CallInst *call) {
+        bool result = false;
+        if (IntrinsicInst *intrinsic = dyn_cast<IntrinsicInst>(call)) {
+            result = (intrinsics_needing_authenticated_args.find(
+                    intrinsic->getIntrinsicID()) !=
+                      intrinsics_needing_authenticated_args.end());
+            if (debug_output) {
+                errs() << "Intrinsic (" << intrinsic->getIntrinsicID() << ") ";
+                intrinsic->print(errs());
+                if (result) {
+                    errs() << " is in { ";
+                } else {
+                    errs() << " is not in { ";
+                }
+                for (auto id : intrinsics_needing_authenticated_args) {
+                    errs() << id << " ";
+                }
+                errs() << "}\n";
+            }
+        }
+        return result;
+    }
+
+    /**
+         * @brief Computes the definition chain from an arbitrary value to its source definition
+         * @param v
+         * @return The chain of definitions starting from v to the source definition
+         */
+    std::vector<Value *>
+    CommonHAKCAnalysis::findDefChain(Value *v, bool followLoad) {
+        assert(v);
+        std::set<Value *> working_list = {v};
+        std::vector<Value *> def_chain;
+        while (!working_list.empty()) {
+            Value *curr = *working_list.begin();
+            working_list.erase(curr);
+            if (GetElementPtrInst *gep = dyn_cast<GetElementPtrInst>(
+                    curr)) {
+                working_list.insert(gep->getPointerOperand());
+            } else if (BitCastInst *bitcast = dyn_cast<BitCastInst>(curr)) {
+                working_list.insert(bitcast->getOperand(0));
+            } else if (CallInst *call = dyn_cast<CallInst>(curr)) {
+                if (call->getCalledFunction() &&
+                    call->getCalledFunction()->getName() ==
+                    data_check_name) {
+                    working_list.insert(call->getArgOperand(
+                            call->getNumArgOperands() - 1));
+                    continue;
+                }
+            } else if (GEPOperator *gep = dyn_cast<GEPOperator>(curr)) {
+                working_list.insert(gep->getPointerOperand());
+            } else if (BitCastOperator *bitcast = dyn_cast<BitCastOperator>(
+                    curr)) {
+                working_list.insert(bitcast->getOperand(0));
+            } else if (PtrToIntInst *cast = dyn_cast<PtrToIntInst>(curr)) {
+                working_list.insert(cast->getPointerOperand());
+            } else if (PtrToIntOperator *cast = dyn_cast<PtrToIntOperator>(
+                    curr)) {
+                working_list.insert(cast->getPointerOperand());
+            } else if (followLoad && isa<LoadInst>(curr)) {
+                LoadInst *load = dyn_cast<LoadInst>(curr);
+                working_list.insert(load->getPointerOperand());
+            } else if (IntToPtrInst *bitcast = dyn_cast<IntToPtrInst>(curr)) {
+                working_list.insert(bitcast->getOperand(0));
+            } else if (SExtInst *sext = dyn_cast<SExtInst>(curr)) {
+                working_list.insert(sext->getOperand(0));
+            } else if (BinaryOperator *binOp = dyn_cast<BinaryOperator>(curr)) {
+                if (getDef(binOp->getOperand(0))->getType()->isPointerTy()) {
+                    if (debug_output) {
+                        errs() << "Adding arg 0 of ";
+                        binOp->print(errs());
+                        errs() << "\n";
+                    }
+                    working_list.insert(binOp->getOperand(0));
+                } else if (getDef(
+                        binOp->getOperand(1))->getType()->isPointerTy()) {
+                    if (debug_output) {
+                        errs() << "Adding arg 1 of ";
+                        binOp->print(errs());
+                        errs() << "\n";
+                    }
+                    working_list.insert(binOp->getOperand(1));
+                }
+            }
+            def_chain.push_back(curr);
+        }
+
+        return def_chain;
+    }
+
+    /**
+     * @brief
+     * @param v
+     * @return The argument number if @param v is an Argument, or -1 otherwise
+     */
+    int CommonHAKCAnalysis::getFunctionArgNumber(Value *v) {
+        if (Argument *arg = dyn_cast<Argument>(getDef(v))) {
+            return arg->getArgNo();
+        }
+        return -1;
+    }
+
+    /**
+         * @brief Returns the source definition of a Value
+         * @param V
+         * @return
+         */
+    Value *CommonHAKCAnalysis::getDef(Value *V, bool followLoad) {
+        std::vector<Value *> def_chain = findDefChain(V, followLoad);
+        assert(!def_chain.empty());
+        return def_chain.back();
+    }
+
+    /**
+     * @brief Returns the color value of @param symbolName, or nullptr
+     * @param M
+     * @param symbolName
+     * @return
+     */
+    GlobalVariable *
+    CommonHAKCAnalysis::getSymbolColor(Module &M, StringRef symbolName) {
+        std::string colorName = color_name.str();
+        colorName += "_";
+        colorName += symbolName.str();
+
+        GlobalVariable *symbolColorVar = M.getGlobalVariable(colorName,
+                                                             true);
+        return symbolColorVar;
+    }
+
+    /**
+         * @brief Returns true if the called function is in the list of safe transition calls defined above
+         * @param call
+         * @return
+         */
+    bool CommonHAKCAnalysis::callIsSafeTransition(CallInst *call) {
+        if (call->getCalledFunction()) {
+            return isSafeTransitionFunction(call->getCalledFunction());
+        }
+
+        return false;
+    }
+
+    /**
+     * @brief
+     * @param F
+     * @return true if #F name is in #hakc_functions or
+     * #hakc_transfer_funcs, false otherwise
+     * */
+    bool CommonHAKCAnalysis::isHAKCFunction(Function *F) {
+        return (hakc_functions.find(F->getName()) != hakc_functions.end()) ||
+               (hakc_transfer_funcs.find(F->getName()) !=
+                hakc_transfer_funcs.end());
+    }
+
+    /**
+     * @brief
+     * @param F
+     * @return true if F->getName() is in #safe_transition_functions, false
+     * otherwise
+     */
+    bool CommonHAKCAnalysis::isSafeTransitionFunction(Function *F) {
+        return (safe_transition_functions.find(F->getName()) !=
+                safe_transition_functions.end() ||
+                kernel_allocation_funcs.find(F->getName()) !=
+                kernel_allocation_funcs.end());
+    }
+
+
+    bool CommonHAKCAnalysis::isOutsideTransferFunc(Function *F) {
+        return (F->getName().startswith(outside_transfer_prefix));
+    }
+
+    bool CommonHAKCAnalysis::isRegisterRead(Value *v) {
+        if (CallInst *call = dyn_cast<CallInst>(v)) {
+            return call->isInlineAsm() || (call->getCalledFunction() &&
+                                           call->getCalledFunction()->isIntrinsic() &&
+                                           call->getCalledFunction()->getIntrinsicID() ==
+                                           Intrinsic::IndependentIntrinsics::read_register);
+        }
+        return false;
+    }
+
+    bool CommonHAKCAnalysis::isPerCPUPointer(Value *v) {
+        if (LoadInst *load = dyn_cast<LoadInst>(v)) {
+            return isPerCPUPointer(load->getPointerOperand());
+        } else if (IntToPtrInst *cast = dyn_cast<IntToPtrInst>(v)) {
+            return isPerCPUPointer(cast->getOperand(0));
+        } else if (AddOperator *add = dyn_cast<AddOperator>(v)) {
+            bool arg0ReadsRegister = isRegisterRead(getDef(add->getOperand(0)));
+            bool arg1ReadsRegister = isRegisterRead(getDef(add->getOperand(1)));
+            bool arg0ReadsPercpuOffset = false;
+            if (LoadInst *load = dyn_cast<LoadInst>(
+                    getDef(add->getOperand(0)))) {
+                if (GlobalValue *gv = dyn_cast<GlobalValue>(
+                        getDef(load->getPointerOperand()))) {
+                    arg0ReadsPercpuOffset = (gv->getName() ==
+                                             "__per_cpu_offset");
+                }
+            }
+            bool arg0IsPointer = getDef(
+                    add->getOperand(0))->getType()->isPointerTy();
+            bool arg1IsPointer = getDef(
+                    add->getOperand(1))->getType()->isPointerTy();
+            bool arg1ReadsPercpuOffset = false;
+            if (LoadInst *load = dyn_cast<LoadInst>(
+                    getDef(add->getOperand(1)))) {
+                if (GlobalValue *gv = dyn_cast<GlobalValue>(
+                        getDef(load->getPointerOperand()))) {
+                    arg1ReadsPercpuOffset = (gv->getName() ==
+                                             "__per_cpu_offset");
+                }
+            }
+
+            if (debug_output) {
+                errs() << "Checking if ";
+                add->print(errs());
+                errs() << " is a per-cpu pointer:\n"
+                       << "arg0ReadsRegister: " << arg0ReadsRegister
+                       << " arg0ReadsPercpuOffset: " << arg0ReadsPercpuOffset
+                       << " arg0IsPointer: " << arg0IsPointer << "\n"
+                       << " arg1ReadsRegister: " << arg1ReadsRegister
+                       << " arg1ReadsPercpuOffset: " << arg1ReadsPercpuOffset
+                       << " arg1IsPointer: " << arg1IsPointer << "\n";
+            }
+            return (((arg0ReadsRegister || arg0ReadsPercpuOffset) &&
+                     !arg1ReadsRegister && !arg1ReadsPercpuOffset &&
+                     arg1IsPointer) ||
+                    ((arg1ReadsRegister || arg1ReadsPercpuOffset) &&
+                     !arg0ReadsRegister && !arg0ReadsPercpuOffset &&
+                     arg1IsPointer));
+        }
+
+        return false;
+    }
+
+    bool CommonHAKCAnalysis::functionIsAnalysisCandidate(Function *F) {
+        if (!F) {
+            return true;
+        }
+        if (isSafeTransitionFunction(F)) {
+            return false;
+        }
+        if (isHAKCFunction(F)) {
+            return false;
+        }
+        if (F->getName() == "printk") {
+            return false;
+        }
+        if (isOutsideTransferFunc(F)) {
+            return false;
+        }
+        if(F->isIntrinsic()) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+        * @brief Moves all unannotated global values to the default PMC data section
+        * @param M
+        */
+    void HAKCModuleTransformation::moveGlobalsToPMCSection() {
+        GlobalVariable *color = M.getNamedGlobal(color_name);
+        assert(color && "Color is missing");
+        const StringRef sectionName = color->getSection();
+        for (auto &global : M.globals()) {
+            /* The global variable has already been placed */
+            if (global.getSection().contains(".hakc.")) {
+                continue;
+            } else if (global.hasExternalLinkage()) {
+                continue;
+            } else if (global.hasGlobalUnnamedAddr()) {
+                continue;
+            } else if (global.getSection() == ".discard.addressable") {
+                continue;
+            }
+
+            auto *symbolColorVar = getSymbolColor(M, global.getName());
+            if (!symbolColorVar &&
+                sections_to_skip.find(global.getSection()) ==
+                sections_to_skip.end()) {
+                std::string finalName = global.getSection().str();
+                if (!finalName.empty()) {
+                    finalName += ".";
+                }
+                finalName += sectionName.str();
+                if (debug_output) {
+                    errs() << "Changing section of global ";
+                    global.print(errs());
+                    errs() << " to section " << finalName << "\n";
+                }
+
+                global.setSection(finalName);
+                moduleModified = true;
+            }
+        }
+    }
+
+    bool HAKCModuleTransformation::functionInAnalysisSet(Function *F) {
+        return authenticatedPointersOut.find(F) !=
+               authenticatedPointersOut.end();
+    }
+
+    void HAKCModuleTransformation::findMismatchedTransfers(Function *F) {
+        std::set<CallInst *> kernelAllocations;
+        std::set<CallInst *> mteTransfers;
+        if (!isCompartmentalized()) {
+            return;
+        }
+
+        for (auto it = inst_begin(F); it != inst_end(F); ++it) {
+            Instruction *inst = &*it;
+            /* Panic() can cause an unreachable state */
+            if (isa<UnreachableInst>(inst->getParent()->getTerminator())) {
+                return;
+            }
+
+            if (CallInst *call = dyn_cast<CallInst>(inst)) {
+                if (kernel_allocation_funcs.find(F->getName()) !=
+                    kernel_allocation_funcs.end()) {
+                    continue;
+                }
+
+                if (call->getCalledFunction()) {
+                    if (kernel_allocation_funcs.find(
+                            call->getCalledFunction()->getName()) !=
+                        kernel_allocation_funcs.end()) {
+                        if (debug_output) {
+                            errs() << "Kernel allocation: ";
+                            call->print(errs());
+                            errs() << "\n";
+                        }
+                        kernelAllocations.insert(call);
+                    } else if (hakc_transfer_funcs.find(
+                            call->getCalledFunction()->getName()) !=
+                               hakc_transfer_funcs.end()) {
+                        if (debug_output) {
+                            errs() << "MTE Transfer: ";
+                            call->print(errs());
+                            errs() << "\n";
+                        }
+                        mteTransfers.insert(call);
+                    }
+                }
+            }
+        }
+
+        for (auto *allocCall : kernelAllocations) {
+            bool transferFound = false;
+            for (auto *transferCall : mteTransfers) {
+                Value *def = getDef(transferCall->getArgOperand(0));
+                if (def == allocCall) {
+                    transferFound = true;
+                    break;
+                } else if (LoadInst *load = dyn_cast<LoadInst>(def)) {
+                    for (auto *user : load->getPointerOperand()->users()) {
+                        if (StoreInst *store = dyn_cast<StoreInst>(user)) {
+                            if (getDef(store->getValueOperand()) == allocCall) {
+                                transferFound = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if (!transferFound) {
+                missingTransfers[F].insert(allocCall);
+            }
+        }
+    }
+
+    // find every pointer dereferenced by F
+    std::set<Value *>
+    HAKCModuleTransformation::findPointerDereferences(Function *F) {
+        std::set<Value *> dereferencedPointers;
+
+        for (auto it = inst_begin(F); it != inst_end(F); ++it) {
+            Instruction *inst = &*it;
+
+            if (LoadInst *load = dyn_cast<LoadInst>(inst)) {
+                dereferencedPointers.insert(load->getPointerOperand());
+            } else if (StoreInst *store = dyn_cast<StoreInst>(inst)) {
+                dereferencedPointers.insert(store->getPointerOperand());
+            } else if (AllocaInst *alloca = dyn_cast<AllocaInst>(inst)) {
+                dereferencedPointers.insert(alloca);
+            }
+        }
+
+        return dereferencedPointers;
+    }
+
+    std::set<Value *> HAKCModuleTransformation::findPointerUses(Function *F) {
+        std::set<Value *> pointerUses = findPointerDereferences(F);
+
+        for (auto it = inst_begin(F); it != inst_end(F); ++it) {
+            if (CallInst *call = dyn_cast<CallInst>(&*it)) {
+                for (auto &arg : call->args()) {
+                    if (arg->getType()->isPointerTy()) {
+                        pointerUses.insert(arg.get());
+                    }
+                }
+            }
+        }
+
+        return pointerUses;
+    }
+
+    bool HAKCModuleTransformation::isModuleCompartmentalized(Module &M) {
+        for (const auto &global : M.globals()) {
+            if (global.getName().contains("claque_id")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool HAKCModuleTransformation::functionNeedsAnalysis(Function *F) {
+        bool needsAnalysis = !(F->isIntrinsic() ||
+                               F->isDeclaration() ||
+                               F->doesNotAccessMemory() ||
+                               !F->hasExactDefinition() ||
+                               isOutsideTransferFunc(F) /*||
+                               F->getSubprogram() == nullptr*/
+        );
+        if (!needsAnalysis) {
+            goto out;
+        }
+
+        needsAnalysis = (                  /*!isSafeTransitionFunction(F) &&*/
+                !isHAKCFunction(F) /*&&
+                         !isManuallyAnnotated(F)*/
+        );
+        if (!needsAnalysis) {
+            goto out;
+        }
+
+        for (auto *user : F->users()) {
+            if (!isa<CallInst>(user)) {
+                /* Function is passed into a global variable */
+                needsAnalysis = true;
+            }
+        }
+
+        out:
+        if (debug_output) {
+            errs() << F->getName();
+            if (!needsAnalysis) {
+                errs() << " does not need ";
+            } else {
+                errs() << " needs ";
+            }
+            errs() << "analysis\n";
+        }
+
+        if (F->getName().contains("static_branch_")) {
+            /* These functions call inline assembly that needs to be
+             * constant at compile time, so we can't analyze them.
+             * We ensure that any pointer passed to these functions have
+             * no signature in argNeedsAnalysis.
+             */
+            needsAnalysis = false;
+        }
+
+        return needsAnalysis;
+    }
+
+    std::set<Value *>
+    HAKCModuleTransformation::findAuthenticatedPointersAtStart(Function *F) {
+        std::set<Value *> authenticatedPointers;
+        if (!isCompartmentalized()) {
+            if(debug_output) {
+                errs() << M.getName() << " is not compartmentalized\n";
+            }
+            return authenticatedPointers;
+        }
+
+        if (!F->hasInternalLinkage() ||
+            optimization_deny_list.find(F->getName()) != optimization_deny_list.end()) {
+            if(debug_output) {
+                errs() << F->getName() << " is not internalized linked\n";
+            }
+            return authenticatedPointers;
+        }
+
+        for (auto *ptr : findPointerUses(F)) {
+            bool pointerAlwaysAuthenticated = false;
+            //            if (debug_output) {
+            //                errs() << "Users of " << F->getName() << ":\n";
+            //            }
+            for (auto *user : F->users()) {
+                //                if (debug_output) {
+                //                    user->print(errs());
+                //                    errs() << "\n";
+                //                }
+                if (CallInst *call = dyn_cast<CallInst>(user)) {
+                    Function *G = call->getFunction();
+
+                    if (G == F) {
+                        continue;
+                    }
+
+                    //                    if (debug_output) {
+                    //                        errs() << "\t" << G->getName() << "\n";
+                    //                    }
+
+                    std::set<Value *> gAuthenticatedPointers = getAuthenticatedPointersOut(
+                            G);
+                    bool foundPtr = false;
+                    for (auto *gPtr : gAuthenticatedPointers) {
+                        if (pointersMatch(ptr, F, gPtr, G)) {
+                            foundPtr = true;
+                            if (debug_output) {
+                                ptr->print(errs());
+                                errs() << " matches ";
+                                gPtr->print(errs());
+                                errs() << "\n";
+                            }
+                            break;
+                        }
+                    }
+
+                    if (!foundPtr) {
+                        if(debug_output) {
+                            errs() << "Pointer ";
+                            ptr->print(errs());
+                            errs() << " (";
+                            getDef(ptr)->print(errs());
+                            errs() << ")";
+                            errs() << " is not authenticated by " << G->getName() << "\n";
+                        }
+                        pointerAlwaysAuthenticated = false;
+                        break;
+                    } else {
+                        pointerAlwaysAuthenticated = true;
+                        /* Continue on to try the next user */
+                    }
+                }
+            }
+
+            if (pointerAlwaysAuthenticated) {
+                if (debug_output) {
+                    ptr->print(errs());
+                    errs() << " in " << F->getName()
+                           << " is always authenticated\n";
+                }
+                authenticatedPointers.insert(ptr);
+            }
+        }
+
+        /* Find the intersection of provably authenticated pointers
+                 * of all called functions, so we can be sure that any pointer argument
+                 * passed to a function doesn't check against an authenticated pointer */
+        if (!authenticatedPointers.empty()) {
+            for (auto it = inst_begin(F); it != inst_end(F); ++it) {
+                if (CallInst *call = dyn_cast<CallInst>(&*it)) {
+                    if (functionIsAnalysisCandidate(
+                            call->getCalledFunction())) {
+                        for (auto &use : call->args()) {
+                            if (use->getType()->isPointerTy() &&
+                                authenticatedPointers.find(use.get()) !=
+                                authenticatedPointers.end()) {
+                                bool inAuthFound = false;
+                                for (auto *inAuthPtr : getAuthenticatedPointersIn(
+                                        call->getCalledFunction())) {
+                                    if (pointersMatch(use.get(), F, inAuthPtr,
+                                                      call->getCalledFunction())) {
+                                        inAuthFound = true;
+                                        break;
+                                    }
+                                }
+                                if (!inAuthFound) {
+                                    if (debug_output) {
+                                        errs() << "Removing ";
+                                        use->print(errs());
+                                        errs()
+                                                << " from authenticated pointers because it is passed to "
+                                                << call->getCalledFunction()->getName()
+                                                << "\n";
+                                        for (auto *inAuthPtr : getAuthenticatedPointersIn(
+                                                call->getCalledFunction())) {
+                                            pointersMatch(use.get(), F,
+                                                          inAuthPtr,
+                                                          call->getCalledFunction(),
+                                                          true);
+                                        }
+                                    }
+                                    std::set<Value *> toRemove;
+                                    for (auto *ptr : authenticatedPointers) {
+                                        if (getDef(ptr) == getDef(use.get())) {
+                                            toRemove.insert(ptr);
+                                        }
+                                    }
+                                    for (auto *ptr : toRemove) {
+                                        authenticatedPointers.erase(ptr);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            if(debug_output) {
+                errs() << "authenticatedPointers is empty\n";
+            }
+        }
+
+        return authenticatedPointers;
+    }
+
+    bool HAKCModuleTransformation::pointersMatch(Value *aPtr, Function *aFunc,
+                                                 Value *bPtr,
+                                                 Function *bFunc, bool print) {
+        Value *aDef = getDef(aPtr);
+        Value *bDef = getDef(bPtr);
+
+//        if (aDef->getType() != bDef->getType()) {
+//            if (debug_output && print) {
+//                errs() << "1: ";
+//                aDef->print(errs());
+//                errs() << " (Type: ";
+//                aDef->getType()->print(errs());
+//                errs() << ") does not match ";
+//                bDef->print(errs());
+//                errs() << " (Type: ";
+//                bDef->getType()->print(errs());
+//                errs() << ")\n";
+//                errs() << "----- " << findDefChain(bPtr).size() << "\n";
+//                for (auto *v : findDefChain(bPtr)) {
+//                    v->print(errs());
+//                    errs() << "\n";
+//                }
+//                errs() << "-----\n";
+//            }
+//            return false;
+//        }
+
+        if (isa<Argument>(aDef)) {
+            Argument *aArg = dyn_cast<Argument>(aDef);
+            for (auto it = inst_begin(bFunc); it != inst_end(bFunc); ++it) {
+                if (CallInst *call = dyn_cast<CallInst>(&*it)) {
+                    if (call->getCalledFunction() == aFunc &&
+                        getDef(call->getArgOperand(aArg->getArgNo())) ==
+                        bDef) {
+                        if (debug_output) {
+                            aPtr->print(errs());
+                            errs() << " matches ";
+                            bPtr->print(errs());
+                            errs() << "\n";
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
+
+        if (isa<Argument>(bDef)) {
+            Argument *bArg = dyn_cast<Argument>(bDef);
+            for (auto it = inst_begin(aFunc); it != inst_end(aFunc); ++it) {
+                if (CallInst *call = dyn_cast<CallInst>(&*it)) {
+                    if (call->getCalledFunction() == bFunc &&
+                        getDef(call->getArgOperand(bArg->getArgNo())) ==
+                        aDef) {
+                        if (debug_output) {
+                            aPtr->print(errs());
+                            errs() << " matches ";
+                            bPtr->print(errs());
+                            errs() << "\n";
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
+
+        if (debug_output && print) {
+            errs() << "2: ";
+            aPtr->print(errs());
+            errs() << " (Type: ";
+            aPtr->getType()->print(errs());
+            errs() << ") does not match ";
+            bPtr->print(errs());
+            errs() << " (Type: ";
+            bPtr->getType()->print(errs());
+            errs() << ")\n";
+            errs() << "----- " << findDefChain(bPtr).size() << "\n";
+            for (auto *v : findDefChain(bPtr)) {
+                v->print(errs());
+                errs() << "\n";
+            }
+            errs() << "-----\n";
+        }
+
+        return false;
+    }
+
+    bool HAKCModuleTransformation::isCompartmentalized() {
+        return compartmentalized;
+    }
+
+    bool HAKCModuleTransformation::isModuleTransformed() {
+        return moduleModified;
+    }
+
+    std::set<Value *>
+    HAKCModuleTransformation::getAuthenticatedPointersIn(Function *F) {
+        std::set<Value *> result;
+        if (F) {
+            if (authenticatedPointersIn.find(F) !=
+                authenticatedPointersIn.end()) {
+                result = authenticatedPointersIn[F];
+            }
+        }
+
+        return result;
+    }
+
+    std::set<Value *>
+    HAKCModuleTransformation::getAuthenticatedPointersOut(Function *F) {
+        std::set<Value *> result;
+        if (F) {
+            if (authenticatedPointersOut.find(F) !=
+                authenticatedPointersOut.end()) {
+                result = authenticatedPointersOut[F];
+            }
+        }
+
+        return result;
+    }
+
+    void HAKCModuleTransformation::performTransformations() {
+        if (isCompartmentalized()) {
+            compartmentalizeModule();
+        } else {
+            removeSignatures();
+        }
+    }
+
+    void HAKCModuleTransformation::removeSignatures() {
+        for (auto it : authenticatedPointersOut) {
+            debug_output = (it.first->getName() == debugName);
+            if (debug_output) {
+                errs() << "Removing signatures from "
+                       << it.first->getName()
+                       << " with authenticated pointers:\n";
+                for (auto *ptr : getAuthenticatedPointersIn(it.first)) {
+                    ptr->print(errs());
+                    errs() << "\n";
+                }
+                errs() << "\n\n";
+            }
+
+            std::set<Value *> authenticatedPtrs = getAuthenticatedPointersIn(
+                    it.first);
+            HAKCFunctionAnalysis functionAnalysis(*it.first, debug_output,
+                                                  *this);
+            functionAnalysis.removeSignatures();
+            moduleModified |= functionAnalysis.modifiedFunction();
+        }
+    }
+
+    void HAKCModuleTransformation::compartmentalizeModule() {
+        if (!isCompartmentalized()) {
+            return;
+        }
+
+        moveGlobalsToPMCSection();
+
+        for (auto it : authenticatedPointersOut) {
+            debug_output = (it.first->getName() == debugName);
+            if (debug_output) {
+                errs() << "Adding instrumentation to "
+                       << it.first->getName()
+                       << " with authenticated pointers:\n";
+                for (auto *ptr : getAuthenticatedPointersIn(it.first)) {
+                    ptr->print(errs());
+                    errs() << "\n";
+                }
+                errs() << "\n\n";
+            }
+            std::set<Value *> authenticatedPtrs = getAuthenticatedPointersIn(
+                    it.first);
+            //                authenticatedPtrs.clear();
+            HAKCFunctionAnalysis functionAnalysis(*it.first, debug_output,
+                                                  *this);
+            functionAnalysis.addCompartmentalization();
+            moduleModified |= functionAnalysis.modifiedFunction();
+
+            totalCodeChecks += functionAnalysis.addedCodeCheckCount;
+            totalDataChecks += functionAnalysis.addedDataCheckCount;
+            totalTransfers += functionAnalysis.addedClaqueTransferCount +
+                              functionAnalysis.addedCliqueTransferCount;
+        }
+    }
+
     bool HAKCFunctionAnalysis::valueIsReadonlyPtr(Value *value) {
         bool result = isa<PointerType>(value->getType()) &&
                       isa<FunctionType>(
@@ -28,7 +1245,7 @@ namespace hakc {
         assert(operand->getType()->isPointerTy() ||
                operand->getType()->isIntegerTy(64));
 
-        bool isData = !valueIsReadonlyPtr(getDef(operand, false, debug_output));
+        bool isData = !valueIsReadonlyPtr(getDef(operand));
 
         FunctionType *ftype = FunctionType::get(irBuilder.getInt8PtrTy(),
                                                 {irBuilder.getInt8PtrTy(),
@@ -46,8 +1263,8 @@ namespace hakc {
                                                                  claqueId,
                                                                  currentColor,
                                                                  isData
-                                                                         ? irBuilder.getFalse()
-                                                                         : irBuilder.getTrue()});
+                                                                 ? irBuilder.getFalse()
+                                                                 : irBuilder.getTrue()});
         return result;
     }
 
@@ -63,7 +1280,7 @@ namespace hakc {
         assert(operand->getType()->isPointerTy() ||
                operand->getType()->isIntegerTy(64));
 
-        bool isData = !valueIsReadonlyPtr(getDef(operand, false, debug_output));
+        bool isData = !valueIsReadonlyPtr(getDef(operand));
 
         FunctionType *ftype = FunctionType::get(irBuilder.getInt8PtrTy(),
                                                 {irBuilder.getInt8PtrTy(),
@@ -79,8 +1296,8 @@ namespace hakc {
         CallInst *result = irBuilder.CreateCall(signature_call, {addr_cast,
                                                                  claqueId,
                                                                  isData
-                                                                         ? irBuilder.getFalse()
-                                                                         : irBuilder.getTrue()});
+                                                                 ? irBuilder.getFalse()
+                                                                 : irBuilder.getTrue()});
         return result;
     }
 
@@ -102,7 +1319,7 @@ namespace hakc {
         }
         assert(operand->getType()->isPointerTy());
 
-        bool isData = !valueIsReadonlyPtr(getDef(operand, false, debug_output));
+        bool isData = !valueIsReadonlyPtr(getDef(operand));
 
         FunctionType *ftype = FunctionType::get(irBuilder.getInt8PtrTy(),
                                                 {irBuilder.getInt8PtrTy(),
@@ -118,17 +1335,17 @@ namespace hakc {
         Value *addr_cast = irBuilder.CreateBitCast(operand,
                                                    ftype->getParamType(0));
         Value *size = createSizeOf(
-                operand->getType()->getPointerElementType(), &irBuilder, getFunction().getParent());
+                operand->getType()->getPointerElementType());
         CallInst *result = irBuilder.CreateCall(transfer_call, {addr_cast,
                                                                 size,
                                                                 (claque_id ==
-                                                                                 nullptr
-                                                                         ? claqueId
-                                                                         : claque_id),
+                                                                 nullptr
+                                                                 ? claqueId
+                                                                 : claque_id),
                                                                 original_color,
                                                                 isData
-                                                                        ? irBuilder.getFalse()
-                                                                        : irBuilder.getTrue()});
+                                                                ? irBuilder.getFalse()
+                                                                : irBuilder.getTrue()});
         addedClaqueTransferCount++;
         if (debug_output) {
             errs() << "Created transfer for ";
@@ -144,6 +1361,27 @@ namespace hakc {
         return result;
     }
 
+    /**
+         * @brief Returns the size of a type, or the result of sizeof(). This is needed
+         * because LLVM Types can be unsized or forward declared, and will throw an exception
+         * when getTypeAllocSize is called.
+         * @param type The Type that needs a size
+         * @return The size of the object
+         */
+    Value *HAKCFunctionAnalysis::createSizeOf(Type *type) {
+        if (type->isSized()) {
+            DataLayout layout(getFunction().getParent());
+            return irBuilder.getInt64(layout.getTypeAllocSize(type));
+        } else if (type->isEmptyTy() || type->isFunctionTy()) {
+            /* Opaque (aka forward declared) structs, so assume tag granularity */
+            return irBuilder.getInt64(16);
+        }
+        Value *nullVal = ConstantPointerNull::getNullValue(type);
+        Value *idxVal = ConstantInt::get(irBuilder.getInt32Ty(), 1);
+        Value *size = irBuilder.CreateGEP(nullVal, idxVal);
+        return irBuilder.CreatePtrToInt(size, irBuilder.getInt64Ty());
+    }
+
     Value *
     HAKCFunctionAnalysis::addTransferToTarget(Value *value, Value *address) {
         FunctionType *ftype = FunctionType::get(irBuilder.getInt8PtrTy(),
@@ -156,7 +1394,7 @@ namespace hakc {
                 transfer_name, ftype);
         assert(transfer_call && "Could not get transfer call");
 
-        bool isCode = valueIsReadonlyPtr(getDef(value, false, debug_output));
+        bool isCode = valueIsReadonlyPtr(getDef(value));
 
         Value *target_cast = irBuilder.CreateBitCast(address,
                                                      ftype->getParamType(
@@ -173,13 +1411,13 @@ namespace hakc {
         }
         assert(value->getType()->getPointerElementType());
         Value *size = createSizeOf(
-                value->getType()->getPointerElementType(), &irBuilder, getFunction().getParent());
+                value->getType()->getPointerElementType());
         CallInst *result = irBuilder.CreateCall(transfer_call, {target_cast,
                                                                 operand_cast,
                                                                 size,
                                                                 isCode
-                                                                        ? irBuilder.getTrue()
-                                                                        : irBuilder.getFalse()});
+                                                                ? irBuilder.getTrue()
+                                                                : irBuilder.getFalse()});
         addedCliqueTransferCount++;
         return irBuilder.CreateBitCast(result, value->getType());
     }
@@ -304,6 +1542,29 @@ namespace hakc {
         return dominator_block->getTerminator();
     }
 
+    /**
+         * @brief Saves the color of a pointer prior to an indirect call
+         * @param operand The operand of an indirect function call
+         * @return A call to get_color_call or nullptr if the argument is not a pointer
+         */
+    CallInst *HAKCFunctionAnalysis::saveColor(Value *operand) {
+        if (!operand->getType()->isPointerTy() ||
+            isa<ConstantPointerNull>(operand)) {
+            return nullptr;
+        }
+        FunctionType *ftype = FunctionType::get(irBuilder.getInt32Ty(),
+                                                {irBuilder.getInt8PtrTy()},
+                                                false);
+        FunctionCallee save_color_call = getFunction().getParent()->getOrInsertFunction(
+                get_color_name, ftype);
+        assert(save_color_call && "Could not get save color call");
+
+        return irBuilder.CreateCall(save_color_call,
+                                    {irBuilder.CreateBitCast(operand,
+                                                             ftype->getParamType(
+                                                                     0))});
+    }
+
     void HAKCFunctionAnalysis::addGetSafeCodePtr(Value *indirectCallTarget) {
         Instruction *insertionPoint = findUseInsertionPoint(
                 indirectCallTarget, indirectCalls[indirectCallTarget]);
@@ -321,11 +1582,6 @@ namespace hakc {
         }
     }
 
-    GlobalVariable *HAKCFunctionAnalysis::getValidEntryTokens() {
-        Function &F = getFunction();
-        ConstantInt *compartment = getElementCompartment(F.getParent()->getName(), F.getName());
-        return this->compartmentInfo.getTargets(compartment->getZExtValue());
-    }
 
     /**
          * @brief Adds a validity check for an indirect call
@@ -349,11 +1605,11 @@ namespace hakc {
             errs() << "\n";
         }
 
-        GlobalVariable *exitTokens = getValidEntryTokens();
-
+        GlobalVariable *exitTokens = F.getParent()->getNamedGlobal(
+                exit_token_name);
         assert(exitTokens && "Exit token global is null!");
         assert(isa<ArrayType>(
-                       exitTokens->getType()->getPointerElementType()) &&
+                exitTokens->getType()->getPointerElementType()) &&
                "exit tokens are not an array type");
 
         Value *gep = irBuilder.CreateGEP(exitTokens, {irBuilder.getInt64(0),
@@ -430,7 +1686,7 @@ namespace hakc {
                 continue;
             }
 
-            CallInst *originalColor = saveColor(operand.get(), &irBuilder, getFunction().getParent());
+            CallInst *originalColor = saveColor(operand.get());
             originalColors.push_back(originalColor);
             originalOperands.push_back(operand.get());
             Value *newOperand = addTargetTransfer(operand, target_address);
@@ -596,12 +1852,12 @@ namespace hakc {
         for (auto &it : signedPtrsUses) {
             for (auto *use : it.second) {
                 for (auto &operand : use->operands()) {
-                    Value *def = getDef(operand.get(), false, debug_output);
+                    Value *def = getDef(operand.get());
                     if (def != it.first) {
                         continue;
                     }
 
-                    auto defChain = findDefChain(operand.get(), false, debug_output);
+                    auto defChain = findDefChain(operand.get());
                     if (debug_output) {
                         use->print(errs());
                         errs() << ":";
@@ -652,12 +1908,12 @@ namespace hakc {
         for (auto &it : signedPtrsUses) {
             for (auto *use : it.second) {
                 for (auto &operand : use->operands()) {
-                    Value *def = getDef(operand.get(), false, debug_output);
+                    Value *def = getDef(operand.get());
                     if (def != it.first) {
                         continue;
                     }
 
-                    auto defChain = findDefChain(operand.get(), false, debug_output);
+                    auto defChain = findDefChain(operand.get());
 
                     for (int i = defChain.size() - 2; i >= 0; i--) {
                         Value *dc = defChain[i];
@@ -719,7 +1975,7 @@ namespace hakc {
                 for (unsigned i = 0; i < use->getNumOperands(); i++) {
                     Use &operand = use->getOperandUse(i);
                     if (argNeedsAuthentication(operand) &&
-                        (it.first == getDef(operand.get(), false, debug_output) ||
+                        (it.first == getDef(operand.get()) ||
                          it.first == operand.get())) {
                         Value *auth_ptr = authenticatedPtrs[operand.get()];
                         if (!auth_ptr) {
@@ -758,7 +2014,7 @@ namespace hakc {
             }
         } else if (CallInst *call = dyn_cast<CallInst>(arg.getUser())) {
             if (InlineAsm *inlineAsm = dyn_cast<InlineAsm>(
-                        call->getCalledOperand())) {
+                    call->getCalledOperand())) {
                 if (debug_output) {
                     errs() << "Arg ";
                     arg->print(errs());
@@ -785,7 +2041,7 @@ namespace hakc {
                            << "\n";
                 }
                 for (auto *inArg : M.getAuthenticatedPointersIn(
-                             call->getCalledFunction())) {
+                        call->getCalledFunction())) {
                     auto inArgNum = getFunctionArgNumber(inArg);
                     if (debug_output) {
                         errs() << "inArgNum = " << inArgNum << " for ";
@@ -794,7 +2050,7 @@ namespace hakc {
                     }
                     if (inArgNum >= 0 &&
                         (unsigned) inArgNum == arg.getOperandNo()) {
-                        return !isa<AllocaInst>(getDef(arg.get(), false, debug_output));
+                        return !isa<AllocaInst>(getDef(arg.get()));
                     }
                 }
                 return ((arg->getType()->isPointerTy() ||
@@ -835,9 +2091,9 @@ namespace hakc {
         bool result = false;
         if (isa<StructType>(structType->getStructElementType(idx))) {
             result = noRecurseTypeNames.find(
-                             structType->getStructElementType(
-                                               idx)
-                                     ->getStructName()) ==
+                    structType->getStructElementType(
+                                    idx)
+                            ->getStructName()) ==
                      noRecurseTypeNames.end();
         }
         if (!result && isa<GlobalVariable>(aggregateVal)) {
@@ -847,12 +2103,12 @@ namespace hakc {
                 Constant *structMember = initializer->getAggregateElement(
                         idx);
                 if (PointerType *ptrType = dyn_cast<PointerType>(
-                            structMember->getType())) {
+                        structMember->getType())) {
                     result =
                             ptrType->getPointerElementType()->isStructTy() &&
                             noRecurseTypeNames.find(
                                     ptrType->getPointerElementType()->getStructName()) ==
-                                    noRecurseTypeNames.end();
+                            noRecurseTypeNames.end();
                 }
             }
         }
@@ -1097,7 +2353,7 @@ namespace hakc {
                                                 std::set<PHINode *> &visited) {
         visited.insert(phiNode);
         for (auto &val : phiNode->incoming_values()) {
-            Value *def = getDef(val.get(), true, debug_output);
+            Value *def = getDef(val.get(), true);
             if (val.get() == target || def == target) {
                 return true;
             } else if (PHINode *phi = dyn_cast<PHINode>(def)) {
@@ -1119,7 +2375,7 @@ namespace hakc {
                                                 use->getType()->isIntegerTy() ||
                                                 use->getType()->isStructTy()
                                                 )*/
-                  )) {
+            )) {
                 ret = true;
             }
         }
@@ -1171,7 +2427,7 @@ namespace hakc {
                     for (unsigned idx = 0;
                          idx < call->getNumArgOperands(); idx++) {
                         Use &arg = call->getArgOperandUse(idx);
-                        Value *def = getDef(arg.get(), false, debug_output);
+                        Value *def = getDef(arg.get());
                         if (def == it.first) {
                             addGlobalClonesAndTransfer(it.first, arg,
                                                        signed_clones, I);
@@ -1198,7 +2454,7 @@ namespace hakc {
                         }*/
                     }
                 } else if (StoreInst *store = dyn_cast<StoreInst>(user)) {
-                    Value *def = getDef(store->getValueOperand(), false, debug_output);
+                    Value *def = getDef(store->getValueOperand());
                     assert(def == it.first && "Unexpected global use");
                     Use &arg = store->getOperandUse(0);
                     addGlobalClonesAndTransfer(it.first, arg, signed_clones, I);
@@ -1209,23 +2465,21 @@ namespace hakc {
                                << getFunction().getName() << "\n";
                     }
                     assert(signed_clones[it.first]);
-                } else if (isa<LoadInst>(user)) {
-                    continue;
-                                        // assert(getDef(load->getPointerOperand()) == it.first && "Unexpected global use");
-                                        // Use &arg = load->getOperandUse(0);
-                                        // addGlobalClonesAndTransfer(it.first, arg, signed_clones, I);
-                                        // if (!signed_clones[it.first]) {
-                                        //     errs() << "Could not create transfer for ";
-                                        //     it.first->print(errs());
-                                        //     errs() << " in function "
-                                        //            << getFunction().getName() << "\n";
-                                        // }
-                                        // assert(signed_clones[it.first]);
-                }
-                else if (PHINode *phi = dyn_cast<PHINode>(user)) {
+                } else if (LoadInst *load = dyn_cast<LoadInst>(user)) {
+                    //                    assert(getDef(load->getPointerOperand()) == it.first && "Unexpected global use");
+                    //                    Use &arg = load->getOperandUse(0);
+                    //                    addGlobalClonesAndTransfer(it.first, arg, signed_clones, I);
+                    //                    if (!signed_clones[it.first]) {
+                    //                        errs() << "Could not create transfer for ";
+                    //                        it.first->print(errs());
+                    //                        errs() << " in function "
+                    //                               << getFunction().getName() << "\n";
+                    //                    }
+                    //                    assert(signed_clones[it.first]);
+                } else if (PHINode *phi = dyn_cast<PHINode>(user)) {
                     bool found = false;
                     for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
-                        if (getDef(phi->getIncomingValue(i), false, debug_output) == it.first) {
+                        if (getDef(phi->getIncomingValue(i)) == it.first) {
                             Use &arg = phi->getOperandUse(i);
                             addGlobalClonesAndTransfer(it.first, arg,
                                                        signed_clones, I);
@@ -1275,7 +2529,7 @@ namespace hakc {
          * @return
          */
     bool HAKCFunctionAnalysis::isStackAllocatedObject(Value *v) {
-        Value *def = getDef(v, false, debug_output);
+        Value *def = getDef(v);
         return isa<AllocaInst>(def) /*&&
                !def->getType()->getPointerElementType()->isPointerTy()*/
                 ;
@@ -1337,7 +2591,7 @@ namespace hakc {
             }
             nodes.insert(phiNode);
             for (auto &val : phiNode->incoming_values()) {
-                Value *def = getDef(val.get(), false, debug_output);
+                Value *def = getDef(val.get());
                 if (debug_output) {
                     errs() << "\tPHI Node value: ";
                     val->print(errs());
@@ -1360,8 +2614,8 @@ namespace hakc {
     }
 
     bool HAKCFunctionAnalysis::isSelectOfAuthenticatedPointers(Value *v) {
-        if (SelectInst *select = dyn_cast<SelectInst>(v)) {
-            if (debug_output) {
+        if(SelectInst *select = dyn_cast<SelectInst>(v)) {
+            if(debug_output) {
                 errs() << "Checking if Value is a select statement of pointers that need checking: ";
             }
             return !pointerShouldBeChecked(select->getFalseValue()) && !pointerShouldBeChecked(select->getTrueValue());
@@ -1393,7 +2647,7 @@ namespace hakc {
             } else if (call->getCalledFunction() &&
                        call->getCalledFunction()->isIntrinsic() &&
                        call->getCalledFunction()->getIntrinsicID() ==
-                               Intrinsic::IndependentIntrinsics::read_register) {
+                       Intrinsic::IndependentIntrinsics::read_register) {
                 return false;
             }
         } else if (isa<Constant>(ptr)) {
@@ -1411,19 +2665,19 @@ namespace hakc {
                                !isa<ConstantPointerNull>(ptr) &&
                                !isa<GlobalValue>(ptr) &&
                                !isPHIofGlobalsOnly(ptr, nodes) &&
-                               !isSelectOfAuthenticatedPointers(ptr);
+                                !isSelectOfAuthenticatedPointers(ptr);
 
 
         if (shouldBeChecked) {
             for (auto *authPtr : pointersAlreadyAuthenticated) {
                 if (debug_output) {
                     errs() << "Checking ";
-                    getDef(ptr, false, debug_output)->print(errs());
+                    getDef(ptr)->print(errs());
                     errs() << " against ";
-                    getDef(authPtr, false, debug_output)->print(errs());
+                    getDef(authPtr)->print(errs());
                     errs() << "\n";
                 }
-                if (getDef(authPtr, false, debug_output) == getDef(ptr, false, debug_output)) {
+                if (getDef(authPtr) == getDef(ptr)) {
                     return false;
                 }
             }
@@ -1437,7 +2691,7 @@ namespace hakc {
          * @param use
          */
     void HAKCFunctionAnalysis::registerPointerDereference(Use &use) {
-        Value *definition = getDef(use.get(), false, debug_output);
+        Value *definition = getDef(use.get());
         if ((isa<StoreInst>(use.getUser()) && isa<IntToPtrInst>(use.get())) ||
             (definition->getType()->isIntegerTy(64))) {
             bool registerUse = false;
@@ -1543,7 +2797,7 @@ namespace hakc {
          * @param load
          */
     void HAKCFunctionAnalysis::handleLoad(LoadInst *load) {
-        auto *def = getDef(load->getPointerOperand(), false, debug_output);
+        auto *def = getDef(load->getPointerOperand());
         if (isa<AllocaInst>(def) && def == load->getPointerOperand()) {
             return;
         }
@@ -1556,7 +2810,7 @@ namespace hakc {
         } else if (PHINode *phi = dyn_cast<PHINode>(def)) {
             for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
                 if (GlobalValue *globalValue = dyn_cast<GlobalValue>(
-                            getDef(phi->getIncomingValue(i), false, debug_output))) {
+                        getDef(phi->getIncomingValue(i)))) {
                     //                    if (globalShouldBeTransferred(phi->getOperandUse(i))) {
                     globalArgumentUses[globalValue].insert(phi);
                     //                    }
@@ -1570,7 +2824,7 @@ namespace hakc {
          * @param store
          */
     void HAKCFunctionAnalysis::handleStore(StoreInst *store) {
-        auto *def = getDef(store->getPointerOperand(), false, debug_output);
+        auto *def = getDef(store->getPointerOperand());
         if (isa<AllocaInst>(def) && def == store->getPointerOperand()) {
             return;
         }
@@ -1578,7 +2832,7 @@ namespace hakc {
                 store->getOperandUse(store->getPointerOperandIndex()));
 
         if (GlobalValue *globalValue = dyn_cast<GlobalValue>(
-                    store->getValueOperand())) {
+                store->getValueOperand())) {
             if (globalShouldBeTransferred(store->getOperandUse(0))) {
                 globalArgumentUses[globalValue].insert(store);
             }
@@ -1586,9 +2840,9 @@ namespace hakc {
     }
 
     bool HAKCFunctionAnalysis::pointerAuthenticatedAtStart(Value *v) {
-        Value *def = getDef(v, false, debug_output);
+        Value *def = getDef(v);
         for (auto *ptr : pointersAlreadyAuthenticated) {
-            if (getDef(ptr, false, debug_output) == def) {
+            if (getDef(ptr) == def) {
                 return true;
             }
         }
@@ -1633,10 +2887,10 @@ namespace hakc {
         if (isCompartmentalizedFunction()) {
             bool arg0NeedsAuth =
                     argNeedsAuthentication(compare->getOperandUse(0)) &&
-                    !isa<GlobalValue>(getDef(compare->getOperand(0), false, debug_output));
+                    !isa<GlobalValue>(getDef(compare->getOperand(0)));
             bool arg1NeedsAuth =
                     argNeedsAuthentication(compare->getOperandUse(1)) &&
-                    !isa<GlobalValue>(getDef(compare->getOperand(1), false, debug_output));
+                    !isa<GlobalValue>(getDef(compare->getOperand(1)));
             if (debug_output) {
                 if (arg0NeedsAuth) {
                     errs() << "Argument 0 needs auth\n";
@@ -1685,10 +2939,6 @@ namespace hakc {
         }
     }
 
-    /**
-     * @brief BinaryOperators (like bitwise OR) should use authenticated values
-     * @param binOp
-     */
     void HAKCFunctionAnalysis::handleBinaryOperator(BinaryOperator *binOp) {
         if (debug_output) {
             errs() << "Checking binary op ";
@@ -1711,14 +2961,14 @@ namespace hakc {
     bool HAKCFunctionAnalysis::globalShouldBeTransferred(Use &globalValueArg) {
         /* Don't transfer to printk */
         if (GlobalValue *globalValue = dyn_cast<GlobalValue>(
-                    getDef(globalValueArg.get(), false, debug_output))) {
+                getDef(globalValueArg.get()))) {
             /* Don't transfer THIS_MODULE */
             if (globalValue->getName() == "__this_module") {
                 return false;
             }
 
             if (CallInst *call = dyn_cast<CallInst>(
-                        globalValueArg.getUser())) {
+                    globalValueArg.getUser())) {
                 if (!functionIsAnalysisCandidate(call->getCalledFunction())) {
                     return false;
                 }
@@ -1760,18 +3010,17 @@ namespace hakc {
         if (call->getCalledFunction() &&
             (call->getCalledFunction()->isDebugInfoForProfiling() ||
              intrinsics_to_skip.find(call->getIntrinsicID()) !=
-                     intrinsics_to_skip.end())) {
+             intrinsics_to_skip.end())) {
             return;
         }
 
         bool needsAuthenticatedArgs = (call->isInlineAsm() ||
                                        (M.functionInAnalysisSet(
-                                                call->getCalledFunction()) &&
+                                               call->getCalledFunction()) &&
                                         !isOutsideTransferFunc(
                                                 call->getCalledFunction()) &&
                                         !M.getAuthenticatedPointersIn(
-                                                  call->getCalledFunction())
-                                                 .empty()) ||
+                                                call->getCalledFunction()).empty()) ||
                                        callIsSafeTransition(call));
 
         if (isa<IntrinsicInst>(call)) {
@@ -1843,7 +3092,7 @@ namespace hakc {
             }
         } else if (!callIsSafeTransition(call)) {
             for (auto &arg : call->args()) {
-                Value *def = getDef(arg.get(), false, debug_output);
+                Value *def = getDef(arg.get());
                 if (GlobalValue *glob = dyn_cast<GlobalValue>(def)) {
                     if (globalShouldBeTransferred(arg)) {
                         if (debug_output) {
@@ -1861,9 +3110,9 @@ namespace hakc {
                     }
                 } else if (PHINode *phiNode = dyn_cast<PHINode>(def)) {
                     for (auto &val : phiNode->incoming_values()) {
-                        Value *valDef = getDef(val.get(), false, debug_output);
+                        Value *valDef = getDef(val.get());
                         if (GlobalValue *glob = dyn_cast<GlobalValue>(
-                                    valDef)) {
+                                valDef)) {
                             if (globalShouldBeTransferred(val)) {
                                 if (debug_output) {
                                     errs() << "Global " << glob->getName()
@@ -1882,7 +3131,7 @@ namespace hakc {
                     }
                 } else if (isa<AllocaInst>(def)) {
                     if (!functionIsAnalysisCandidate(
-                                call->getCalledFunction())) {
+                            call->getCalledFunction())) {
                         if (debug_output) {
                             errs() << "Function called by ";
                             call->print(errs());
@@ -1912,9 +3161,6 @@ namespace hakc {
                     }
                 }
             }
-        } else if (isInHAKCFunctions(call->getCalledFunction()->getName())) {
-            Function &F = getFunction();
-            M.HAKCFunctions[&F].insert(call);
         }
     }
 
@@ -1938,31 +3184,55 @@ namespace hakc {
          */
     void HAKCFunctionAnalysis::getFunctionMTEMetadata() {
         Module &M = *getFunction().getParent();
+        GlobalVariable *claqueId, *color, *accessToken;
+        GlobalVariable *functionColor = getSymbolColor(M,
+                                                       getFunction().getName());
+
+        std::string claqueIdName, colorName, aclName;
+        claqueIdName = claque_id_name.str();
+        colorName = color_name.str();
+        aclName = access_token_name.str();
+
+        if (functionColor) {
+            StringRef funcName = getFunction().getName();
+            std::string addend = "_";
+            addend += funcName.str();
+
+            claqueIdName += addend;
+            colorName += addend;
+            aclName += addend;
+        }
+
+        claqueId = M.getNamedGlobal(claqueIdName);
+        assert(claqueId && "Claque ID could not be found!");
+
+        color = M.getNamedGlobal(colorName);
+        assert(color && "Color could not be found!");
+
+        accessToken = M.getNamedGlobal(aclName);
+        assert(accessToken && "Access Token could not be found!");
 
         Instruction *entry = getFunction().getEntryBlock().getFirstNonPHIOrDbgOrLifetime();
         irBuilder.SetInsertPoint(entry);
+        this->claqueId = irBuilder.CreateLoad(claqueId);
+        this->currentColor = irBuilder.CreateLoad(color);
+        this->currentAccessToken = irBuilder.CreateLoad(accessToken);
 
-        ConstantInt *compartment = getElementCompartment(M.getName(), getFunction().getName());
-        ConstantInt *color = getElementColor(M.getName(), getFunction().getName());
-        ConstantInt *access_token = getElementAccessToken(M.getName(), getFunction().getName());
+        StringRef colorSectionName;
+        if (!functionColor) {
+            colorSectionName = color->getSection();
+        } else {
+            colorSectionName = functionColor->getSection();
+        }
 
-        // assert(compartment && "Compartment could not be found!");
-        // assert(color && "Color could not be found!");
-        // assert(access_token && "Token could not be found!");
-
-        this->claqueId = compartment;
-        this->currentColor = color;
-        this->currentAccessToken = access_token;
-
+        auto split = colorSectionName.split(".data" + section_prepend.str());
         std::string sectionName = getFunction().getSection().str();
-
         if (sectionName.empty()) {
             sectionName = ".text" + section_prepend.str();
         } else {
             sectionName += section_prepend;
         }
-        sectionName += this->compartmentInfo.getColorFromValue(color);
-
+        sectionName += split.second.str();
         if (debug_output) {
             errs() << "Changing section to " << sectionName << "\n";
         }
@@ -1971,19 +3241,19 @@ namespace hakc {
 
     HAKCFunctionAnalysis::HAKCFunctionAnalysis(Function &F, bool debug,
                                                HAKCModuleTransformation &ModTransform)
-        : CommonHAKCAnalysis(debug, ModTransform.getCompartmentInfo()),
-          dominatorTree(F),
-          irBuilder(&F.getEntryBlock()),
-          claqueId(nullptr),
-          currentColor(nullptr),
-          currentAccessToken(nullptr),
-          pointersAlreadyAuthenticated(
-                  ModTransform.getAuthenticatedPointersIn(&F)),
-          M(ModTransform),
-          addedDataCheckCount(0),
-          addedCodeCheckCount(0),
-          addedCliqueTransferCount(0),
-          addedClaqueTransferCount(0) {
+            : CommonHAKCAnalysis(debug),
+              dominatorTree(F),
+              irBuilder(&F.getEntryBlock()),
+              claqueId(nullptr),
+              currentColor(nullptr),
+              currentAccessToken(nullptr),
+              pointersAlreadyAuthenticated(
+                      ModTransform.getAuthenticatedPointersIn(&F)),
+              M(ModTransform),
+              addedDataCheckCount(0),
+              addedCodeCheckCount(0),
+              addedCliqueTransferCount(0),
+              addedClaqueTransferCount(0) {
         for (auto it = inst_begin(F); it != inst_end(F); ++it) {
             Instruction *inst = &*it;
             handleInstruction(inst);
@@ -2097,4 +3367,41 @@ namespace hakc {
         }
     }
 
-}// namespace hakc
+    struct PMCPass : public ModulePass {
+        static char ID;
+
+        PMCPass() : ModulePass(ID) {}
+
+        bool runOnModule(Module &M) override {
+            HAKCModuleTransformation transformation(M);
+            transformation.performTransformations();
+            if (transformation.isCompartmentalized()) {
+                errs() << "Total Data Checks: "
+                       << transformation.totalDataChecks << "\n"
+                       << "Total Code Checks: "
+                       << transformation.totalCodeChecks << "\n"
+                       << "Total Transfers:   " << transformation.totalTransfers
+                       << "\n";
+            }
+            return transformation.isModuleTransformed();
+        }
+    };
+}// namespace
+
+char PMCPass::ID = 0;
+
+static void registerPMCPass(const llvm::PassManagerBuilder &,
+                            llvm::legacy::PassManagerBase &PM) {
+    PM.add(new PMCPass());
+}
+
+static llvm::RegisterStandardPasses
+        RegisterMyPass(llvm::PassManagerBuilder::EP_ScalarOptimizerLate,
+                       registerPMCPass);
+
+static RegisterPass<PMCPass>
+        X("PMCPass", "PAC-MTE Compartment Pass",
+          false,// This pass doesn't modify the CFG => true
+          false // This pass is not a pure analysis pass => false
+);
+
